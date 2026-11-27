@@ -16,6 +16,10 @@ Your PC desktop inside **Meta Quest 3**: giant virtual screens in a virtual envi
 - PC audio streamed to the headset (WASAPI loopback, low-latency playback).
 - **Latency measured end to end** (from the desktop grab on the PC to the moment the image is shown in the headset), split by stage and plotted live in the server control panel.
 
+## Download
+
+Ready-to-use builds are on the [Releases page](https://github.com/Alby90/MirRoar/releases): `MirRoarServer.exe` (Windows 10/11, 64-bit) and `MirRoar-Quest.apk` (Meta Quest 3 / 3S / Pro / 2).
+
 ## Usage
 
 1. **PC**: run `MirRoarServer.exe`. The first time, Windows asks for firewall access: choose **Allow**, otherwise Wi-Fi will not work.

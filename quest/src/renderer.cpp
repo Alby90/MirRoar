@@ -168,15 +168,29 @@ bool Renderer::init() {
 }
 
 GLuint Renderer::framebufferFor(GLuint colorTex) {
-    auto it = fbos_.find(colorTex);
-    if (it != fbos_.end()) return it->second;
     GLuint fbo;
-    glGenFramebuffers(1, &fbo);
+    auto it = fbos_.find(colorTex);
+    if (it != fbos_.end()) {
+        fbo = it->second;
+    } else {
+        glGenFramebuffers(1, &fbo);
+        fbos_[colorTex] = fbo;
+    }
+    // Attach every time: a recreated swapchain can reuse the GL name of a deleted texture, and a
+    // cached FBO would still point at the old (deleted) texture object.
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTex, 0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) LOGE("incomplete framebuffer");
-    fbos_[colorTex] = fbo;
+    if (it == fbos_.end() && glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        LOGE("incomplete framebuffer");
     return fbo;
+}
+
+void Renderer::forgetFramebuffer(GLuint colorTex) {
+    auto it = fbos_.find(colorTex);
+    if (it == fbos_.end()) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &it->second);
+    fbos_.erase(it);
 }
 
 void Renderer::drawVideo(GLuint externalTex, float uMax, float vMax) {

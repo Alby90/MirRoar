@@ -100,15 +100,30 @@ std::string runProcess(const std::string& cmdline) {
     HANDLE rd = nullptr, wr = nullptr;
     if (!CreatePipe(&rd, &wr, &sa, 0)) return {};
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = wr;
-    si.hStdError = wr;
+    // Only the output pipe may be inherited: adb leaves a daemon running, and an inherited
+    // listening socket would keep the server's port busy after the server exits.
+    SIZE_T attrSize = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    std::vector<uint8_t> attrBuf(attrSize);
+    auto* attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)attrBuf.data();
+    HANDLE inherit[1] = {wr};
+    bool attrsOk = InitializeProcThreadAttributeList(attrs, 1, 0, &attrSize) &&
+                   UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof(inherit),
+                                             nullptr, nullptr);
+    STARTUPINFOEXW six{};
+    six.StartupInfo.cb = sizeof(six);
+    six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdOutput = wr;
+    six.StartupInfo.hStdError = wr;
+    six.lpAttributeList = attrsOk ? attrs : nullptr;
     PROCESS_INFORMATION pi{};
     std::wstring cl = utf8ToWide(cmdline);
     std::string out;
-    if (CreateProcessW(nullptr, &cl[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+    DWORD flags = CREATE_NO_WINDOW | (attrsOk ? EXTENDED_STARTUPINFO_PRESENT : 0);
+    BOOL created = CreateProcessW(nullptr, &cl[0], nullptr, nullptr, TRUE, flags, nullptr, nullptr,
+                                  (STARTUPINFOW*)&six, &pi);
+    if (attrsOk) DeleteProcThreadAttributeList(attrs);
+    if (created) {
         CloseHandle(wr);
         wr = nullptr;
         char tmp[4096];

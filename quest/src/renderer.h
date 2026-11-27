@@ -11,6 +11,7 @@ class Renderer {
 public:
     bool init();
     GLuint framebufferFor(GLuint colorTex);
+    void forgetFramebuffer(GLuint colorTex);  // call before the texture goes away (swapchain destroyed)
 
     // Screen content pass (into the screen swapchain)
     void drawVideo(GLuint externalTex, float uMax, float vMax);

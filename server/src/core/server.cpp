@@ -52,7 +52,7 @@ bool Server::openListener() {
         std::lock_guard<std::mutex> lk(m_);
         port = cfg_.port;
     }
-    socket_t ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    socket_t ls = noInherit(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -98,7 +98,7 @@ void Server::acceptLoop() {
         if (select((int)ls + 1, &rs, nullptr, nullptr, &tv) <= 0) continue;
         sockaddr_in peer{};
         socklen_t plen = sizeof(peer);
-        socket_t cs = accept(ls, (sockaddr*)&peer, &plen);
+        socket_t cs = noInherit(accept(ls, (sockaddr*)&peer, &plen));
         if (cs == kInvalidSocket) continue;
         char ip[64];
         inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
@@ -136,7 +136,7 @@ void Server::discoveryLoop() {
             strncpy(b.name, cfg_.name.c_str(), sizeof(b.name) - 1);
         }
         for (auto& ni : listIPv4Interfaces()) {
-            socket_t s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            socket_t s = noInherit(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
             if (s == kInvalidSocket) continue;
             int yes = 1;
             setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&yes, sizeof(yes));

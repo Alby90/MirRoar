@@ -641,6 +641,7 @@ public:
     }
 
     void destroySwapchain(Swapchain& sc) {
+        for (auto& img : sc.images) renderer.forgetFramebuffer(img.image);
         if (sc.handle) xrDestroySwapchain(sc.handle);
         sc = Swapchain();
     }
