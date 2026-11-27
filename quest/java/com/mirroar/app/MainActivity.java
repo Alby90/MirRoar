@@ -161,6 +161,69 @@ public class MainActivity extends NativeActivity {
         return px;
     }
 
+    /**
+     * Rasterizes a UI laid out by native code (which also does the hit testing) as a list of items.
+     * kinds: 0 title, 1 section header, 2 label, 3 value, 4 button. rects: left, top, right, bottom
+     * in pixels, 4 per item. flags: bit 0 = hovered, bit 1 = on/active. Returns ARGB pixels.
+     */
+    public static int[] renderItems(int width, int height, int[] kinds, float[] rects, String[] texts, int[] flags) {
+        Bitmap bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(bmp);
+        c.drawColor(Color.TRANSPARENT);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float r = Math.min(width, height) * 0.03f;
+        p.setColor(Color.rgb(18, 20, 28));
+        c.drawRoundRect(new RectF(0, 0, width, height), r, r, p);
+        Typeface bold = Typeface.create("sans-serif-medium", Typeface.BOLD);
+        Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+        Typeface normal = Typeface.create("sans-serif", Typeface.NORMAL);
+        for (int i = 0; i < kinds.length; i++) {
+            RectF b = new RectF(rects[i * 4], rects[i * 4 + 1], rects[i * 4 + 2], rects[i * 4 + 3]);
+            boolean hover = (flags[i] & 1) != 0, on = (flags[i] & 2) != 0;
+            float h = b.height();
+            switch (kinds[i]) {
+                case 0:
+                    drawFit(c, p, texts[i], b, h * 0.62f, bold, Color.WHITE, false);
+                    break;
+                case 1:
+                    drawFit(c, p, texts[i], b, h * 0.46f, medium, Color.rgb(140, 190, 255), false);
+                    break;
+                case 2:
+                    drawFit(c, p, texts[i], b, h * 0.40f, normal, Color.rgb(215, 220, 230), false);
+                    break;
+                case 3:
+                    drawFit(c, p, texts[i], b, h * 0.42f, medium, Color.WHITE, true);
+                    break;
+                default: {
+                    int bg = on ? Color.rgb(48, 128, 240) : Color.rgb(44, 49, 64);
+                    if (hover) bg = on ? Color.rgb(90, 160, 255) : Color.rgb(74, 82, 104);
+                    p.setColor(bg);
+                    c.drawRoundRect(b, h * 0.25f, h * 0.25f, p);
+                    drawFit(c, p, texts[i], b, h * 0.42f, medium, Color.WHITE, true);
+                }
+            }
+        }
+        int[] px = new int[width * height];
+        bmp.getPixels(px, 0, width, 0, 0, width, height);
+        bmp.recycle();
+        return px;
+    }
+
+    /** Draws one line of text vertically centered in b, shrinking it until it fits the width. */
+    private static void drawFit(Canvas c, Paint p, String text, RectF b, float size, Typeface tf, int color,
+                                boolean center) {
+        p.setTypeface(tf);
+        p.setColor(color);
+        p.setTextAlign(center ? Paint.Align.CENTER : Paint.Align.LEFT);
+        float ts = size;
+        p.setTextSize(ts);
+        while (p.measureText(text) > b.width() * 0.96f && ts > 8) {
+            ts -= 1;
+            p.setTextSize(ts);
+        }
+        c.drawText(text, center ? b.centerX() : b.left, b.centerY() + ts * 0.36f, p);
+    }
+
     /** Invisible view that owns the IME connection and forwards everything to native code. */
     static class KeyboardSink extends View {
         KeyboardSink(Context ctx) {

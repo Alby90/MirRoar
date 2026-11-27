@@ -176,6 +176,13 @@ void Session::receiverLoop() {
             }
             continue;
         }
+        if (h.type == C_OPTIONS) {
+            std::lock_guard<std::mutex> ol(optM_);
+            if (!hasOptions_) defaultOptions(options_);
+            decodeOptions((const char*)p, h.size, options_);
+            hasOptions_ = true;
+            continue;
+        }
         if (h.type == C_STATS) {
             if (h.size >= sizeof(CStats)) {
                 CStats cs;
@@ -231,6 +238,23 @@ void Session::receiverLoop() {
     alive_ = false;
     qcv_.notify_all();
     helloCv_.notify_all();
+}
+
+bool Session::headsetOptions(float* out) {
+    std::lock_guard<std::mutex> lk(optM_);
+    if (hasOptions_) memcpy(out, options_, sizeof(options_));
+    return hasOptions_;
+}
+
+void Session::setHeadsetOptions(const float* v) {
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lk(optM_);
+        for (int i = 0; i < OPT_COUNT; ++i) options_[i] = clampOption(i, v[i]);
+        hasOptions_ = true;
+        text = encodeOptions(options_);
+    }
+    enqueue(S_OPTIONS, text.data(), text.size(), nullptr, 0);
 }
 
 void Session::sendMonitorList() {

@@ -29,6 +29,7 @@
 #include "audio_player.h"
 #include "common.h"
 #include "keymap.h"
+#include "../../common/options.h"
 #include "net_client.h"
 #include "renderer.h"
 #include "video_decoder.h"
@@ -48,13 +49,8 @@ static PFNEGLCREATEIMAGEKHRPROC p_eglCreateImageKHR;
 static PFNEGLDESTROYIMAGEKHRPROC p_eglDestroyImageKHR;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC p_glEGLImageTargetTexture2DOES;
 
-// Builds a rotation whose +Z axis points along `fwd` with +Y as close as possible to world up.
-static Quat lookRotation(const Vec3& fwdIn) {
-    Vec3 z = normalize(fwdIn);
-    Vec3 up(0, 1, 0);
-    if (fabsf(dot(z, up)) > 0.99f) up = Vec3(0, 0, 1);
-    Vec3 x = normalize(cross(up, z));
-    Vec3 y = cross(z, x);
+// Rotation from an orthonormal right-handed basis (the rotated +X, +Y, +Z axes).
+static Quat basisRotation(const Vec3& x, const Vec3& y, const Vec3& z) {
     float m00 = x.x, m01 = y.x, m02 = z.x, m10 = x.y, m11 = y.y, m12 = z.y, m20 = x.z, m21 = y.z, m22 = z.z;
     float tr = m00 + m11 + m22;
     Quat q;
@@ -72,6 +68,15 @@ static Quat lookRotation(const Vec3& fwdIn) {
         q = {(m02 + m20) / s, (m12 + m21) / s, 0.25f * s, (m10 - m01) / s};
     }
     return normalizeQ(q);
+}
+
+// Builds a rotation whose +Z axis points along `fwd` with +Y as close as possible to world up.
+static Quat lookRotation(const Vec3& fwdIn) {
+    Vec3 z = normalize(fwdIn);
+    Vec3 up(0, 1, 0);
+    if (fabsf(dot(z, up)) > 0.99f) up = Vec3(0, 0, 1);
+    Vec3 x = normalize(cross(up, z));
+    return basisRotation(x, cross(z, x), z);
 }
 
 static Vec3 yawDir(float yaw) { return Vec3(sinf(yaw), 0, -cosf(yaw)); }
@@ -144,7 +149,7 @@ struct Screen {
     }
 };
 
-enum HitKind { HIT_NONE, HIT_SCREEN, HIT_TOOLBAR, HIT_BAR };
+enum HitKind { HIT_NONE, HIT_SCREEN, HIT_TOOLBAR, HIT_BAR, HIT_OPTIONS };
 struct Hit {
     HitKind kind = HIT_NONE;
     int index = -1;  // screen index (HIT_SCREEN / HIT_BAR, -1 = panel bar)
@@ -154,7 +159,7 @@ struct Hit {
 
 enum ToolbarButton {
     TB_KEYBOARD, TB_ESC, TB_TAB, TB_CTRL, TB_ALT, TB_SHIFT, TB_WIN,
-    TB_SCREEN, TB_ENV, TB_CURVED, TB_RECENTER, TB_DESK, TB_COUNT
+    TB_SCREEN, TB_ENV, TB_CURVED, TB_RECENTER, TB_DESK, TB_OPTIONS, TB_COUNT
 };
 static const uint16_t kLatchVk[4] = {0xA2 /*LCtrl*/, 0xA4 /*LAlt*/, 0xA0 /*LShift*/, 0x5B /*LWin*/};
 static const char* kEnvNames[ENV_COUNT] = {"Passthrough", "Studio", "Space", "Dark"};
@@ -164,7 +169,7 @@ constexpr float kBarW = 0.32f, kBarH = 0.022f, kBarGap = 0.035f;
 
 class App : public NetClient::Handler {
 public:
-    explicit App(android_app* a) : app_(a), net_(this) {}
+    explicit App(android_app* a) : app_(a), net_(this) { defaultOptions(opt); }
 
     android_app* app_;
     bool resumed = false;
@@ -254,7 +259,27 @@ public:
 
     bool deskOn = false, deskPlacing = false;
     Pose deskPose;  // in stage space when available (stable across recenters), else app space
-    float deskW = 0.75f, deskD = 0.40f;
+    // Options (see common/options.h): edited in the Options panel or from the PC, stored in settings.txt
+    float opt[OPT_COUNT];
+    std::atomic<bool> optionsSendPending{false};  // report them to the server (render thread sends)
+    std::string pendingOptions;       // received from the server (guarded by streamM)
+    bool pendingOptionsValid = false;
+    float deskW = 0.75f;
+    float& deskD = opt[OPT_DESK_DEPTH];
+    // two-hand placement: both palms flat on the desk, held still (OPT_DESK_HOLD), confirm the window
+    bool deskPrevOn = false;  // state to restore when the placement is cancelled
+    Pose deskPrevPose;
+    float deskPrevW = 0.75f;
+    int64_t deskPlaceStartUs = 0, deskStillSinceUs = 0, deskConfirmedUs = 0;
+    bool deskHandsValid = false;  // both hands currently give a usable desk pose
+    Vec3 deskAnchor[2];           // palm positions when the hands stopped moving
+    Vec3 deskSumP[2], deskSumUp;  // averages over the still period (steady preview and result)
+    int deskSumN = 0;
+    float deskProgress = 0;  // 0..1 hold progress, for the outline
+    bool deskByHands = false;  // the current placement is driven by both hands (not a controller)
+    // hands resting in the keyboard area don't drive the pointer
+    bool handOnKeys[2] = {false, false};
+    int64_t handLeftKeysUs[2] = {0, 0};
     bool settingsDirty = false;
     int64_t lastSettingsSave = 0;
 
@@ -297,7 +322,8 @@ public:
     jobject activity = nullptr;
     jclass activityClass = nullptr;
     jclass stringClass = nullptr;
-    jmethodID midSetKeyboard = nullptr, midIsKeyboard = nullptr, midRenderPanel = nullptr, midRenderToolbar = nullptr;
+    jmethodID midSetKeyboard = nullptr, midIsKeyboard = nullptr, midRenderPanel = nullptr, midRenderToolbar = nullptr,
+              midRenderItems = nullptr;
 
     int64_t startUs = monoUs();
     int64_t lastFrameUs = 0;
@@ -309,6 +335,12 @@ public:
         via = v;
         connected = true;
         toolbarDirty = true;
+        optionsSendPending = true;  // the server shows (and can edit) the headset options
+    }
+    void onOptions(const char* text, size_t len) override {
+        std::lock_guard<std::mutex> lk(streamM);
+        pendingOptions.assign(text, len);
+        pendingOptionsValid = true;
     }
     void onDisconnected() override {
         connected = false;
@@ -446,6 +478,7 @@ public:
     std::string settingsPath() { return std::string(app_->activity->internalDataPath) + "/settings.txt"; }
 
     void loadSettings() {
+        defaultOptions(opt);
         std::ifstream f(settingsPath());
         std::string key;
         while (f >> key) {
@@ -458,6 +491,13 @@ public:
             else if (key == "deskSize") f >> deskW >> deskD;
             else if (key == "deskPose")
                 f >> deskPose.p.x >> deskPose.p.y >> deskPose.p.z >> deskPose.q.x >> deskPose.q.y >> deskPose.q.z >> deskPose.q.w;
+            else if (key == "opt") {
+                std::string k;
+                float v;
+                f >> k >> v;
+                int id = findOption(k.c_str(), k.size());
+                if (id >= 0) opt[id] = clampOption(id, v);
+            }
             else std::getline(f, key);
         }
         homeWidth = std::min(8.0f, std::max(0.6f, homeWidth));
@@ -471,6 +511,7 @@ public:
           << screenDistance << "\nmonitors " << savedMonitorMask << "\ndesk " << deskOn << "\ndeskSize " << deskW
           << " " << deskD << "\ndeskPose " << deskPose.p.x << " " << deskPose.p.y << " " << deskPose.p.z << " "
           << deskPose.q.x << " " << deskPose.q.y << " " << deskPose.q.z << " " << deskPose.q.w << "\n";
+        for (int i = 0; i < OPT_COUNT; ++i) f << "opt " << kOptions[i].key << " " << opt[i] << "\n";
         settingsDirty = false;
         lastSettingsSave = monoUs();
     }
@@ -486,6 +527,7 @@ public:
         midIsKeyboard = jni->GetMethodID(activityClass, "isKeyboardVisible", "()Z");
         midRenderPanel = jni->GetStaticMethodID(activityClass, "renderPanel", "(Ljava/lang/String;Ljava/lang/String;II)[I");
         midRenderToolbar = jni->GetStaticMethodID(activityClass, "renderToolbar", "([Ljava/lang/String;IIII)[I");
+        midRenderItems = jni->GetStaticMethodID(activityClass, "renderItems", "(II[I[F[Ljava/lang/String;[I)[I");
         if (jni->ExceptionCheck()) {
             jni->ExceptionClear();
             LOGE("JNI method lookup failed");
@@ -1103,6 +1145,8 @@ public:
         float tw, th;
         if (toolbarPose(tp, tw, th) && hitRect(tp, tw, th, o, d, u, v, t) && t < best.t)
             best = {HIT_TOOLBAR, -1, u, v, t, o + d * t};
+        if (optionsPose(tp, tw, th) && hitRect(tp, tw, th, o, d, u, v, t) && t < best.t)
+            best = {HIT_OPTIONS, -1, u, v, t, o + d * t};
         return best;
     }
 
@@ -1175,13 +1219,28 @@ public:
             case TB_ENV: cycleEnvironment(); break;
             case TB_CURVED: toggleCurved(head); break;
             case TB_RECENTER: recenter(head); break;
+            case TB_OPTIONS:
+                optionsOpen = !optionsOpen;
+                break;
             case TB_DESK:
                 if (!deskGeometry) break;
-                if (deskOn && !deskPlacing) {
+                if (deskPlacing) {  // pressed again while placing: cancel
+                    deskPlacing = false;
+                    deskOn = deskPrevOn;
+                    deskPose = deskPrevPose;
+                    deskW = deskPrevW;
+                } else if (deskOn) {
                     deskOn = false;
                 } else {
+                    deskPrevOn = deskOn;
+                    deskPrevPose = deskPose;
+                    deskPrevW = deskW;
                     deskOn = true;
                     deskPlacing = true;
+                    deskPlaceStartUs = monoUs();
+                    deskStillSinceUs = 0;
+                    deskHandsValid = false;
+                    deskProgress = 0;
                 }
                 updatePassthroughState();
                 settingsDirty = true;
@@ -1203,6 +1262,112 @@ public:
             handAim[h] = {XR_TYPE_HAND_TRACKING_AIM_STATE_FB};
             if (extHandAim) locs.next = &handAim[h];
             if (XR_SUCCEEDED(xrLocateHandJointsEXT_(handTrackers[h], &li, &locs)) && locs.isActive) handTracked[h] = true;
+        }
+    }
+
+    // Two-hand desk placement. Both palms rest flat on the desk: their distance gives the window
+    // width, their position and the back-of-hand direction give its position and tilt. Holding
+    // both hands still for OPT_DESK_HOLD confirms. Returns true (and the new app-space pose in
+    // `deskInApp`) when the hands currently define a usable pose.
+    bool placeDeskWithHands(const Pose& head, int64_t now, Pose& deskInApp) {
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        bool valid = handTracked[0] && handTracked[1] && now - deskPlaceStartUs > 700000;
+        Vec3 p[2], up[2];
+        for (int h = 0; valid && h < 2; ++h) {
+            const XrHandJointLocationEXT& palm = joints[h][XR_HAND_JOINT_PALM_EXT];
+            if ((palm.locationFlags & need) != need) {
+                valid = false;
+                break;
+            }
+            Pose pp(palm.pose);
+            p[h] = pp.p;
+            up[h] = rotate(pp.q, Vec3(0, 1, 0));  // out of the back of the hand
+            // palm down and roughly flat (up to ~50 deg of tilt), well below the eyes
+            if (up[h].y < 0.64f || p[h].y > head.p.y - 0.2f) valid = false;
+        }
+        if (valid) {
+            Vec3 span = p[1] - p[0];  // left palm -> right palm
+            float d = length(span);
+            if (d < 0.12f || d > 1.4f || dot(span, rotate(head.q, Vec3(1, 0, 0))) <= 0) valid = false;
+        }
+        if (!valid) {
+            deskHandsValid = false;
+            deskStillSinceUs = 0;
+            deskProgress = 0;
+            return false;
+        }
+
+        // Restart the hold (and the averages) whenever a palm moves away from where it stopped.
+        const float still = opt[OPT_DESK_STILL];
+        if (!deskHandsValid || length(p[0] - deskAnchor[0]) > still || length(p[1] - deskAnchor[1]) > still) {
+            deskAnchor[0] = p[0];
+            deskAnchor[1] = p[1];
+            deskStillSinceUs = now;
+            deskSumP[0] = deskSumP[1] = deskSumUp = Vec3();
+            deskSumN = 0;
+        }
+        deskHandsValid = true;
+        deskSumP[0] = deskSumP[0] + p[0];
+        deskSumP[1] = deskSumP[1] + p[1];
+        deskSumUp = deskSumUp + up[0] + up[1];
+        ++deskSumN;
+        Vec3 L = deskSumP[0] * (1.0f / deskSumN), R = deskSumP[1] * (1.0f / deskSumN);
+        Vec3 y = normalize(deskSumUp);
+        Vec3 x = R - L;
+        x = normalize(x - y * dot(x, y));
+        Vec3 z = cross(x, y);  // towards the user
+        y = cross(z, x);
+        deskW = std::min(1.5f, std::max(0.3f, length(R - L) + opt[OPT_DESK_MARGIN]));  // palms + margin
+        // the palms hover a little over the keys; the keyboard sits a little towards the fingertips
+        deskInApp = Pose(basisRotation(x, y, z), (L + R) * 0.5f - y * opt[OPT_DESK_LIFT] - z * opt[OPT_DESK_FORWARD]);
+
+        deskProgress = std::min(1.0f, (now - deskStillSinceUs) / (opt[OPT_DESK_HOLD] * 1e6f));
+        if (deskProgress >= 1.0f) {
+            deskPlacing = false;
+            deskConfirmedUs = now;
+            deskProgress = 0;
+            deskHandsValid = false;
+            settingsDirty = true;
+            toolbarDirty = true;
+            LOGI("desk placed by hands: %.2f m wide", deskW);
+        }
+        return true;
+    }
+
+    // A tracked hand resting in the keyboard area (the desk window) does not drive the pointer, so
+    // typing doesn't move the PC cursor or click. Hysteresis + a short delay avoid flicker at the edge.
+    void updateHandsOnKeys(const Pose& deskInApp, int64_t now) {
+        Pose inv = inverse(deskInApp);
+        static const int kJoints[] = {XR_HAND_JOINT_PALM_EXT, XR_HAND_JOINT_INDEX_TIP_EXT, XR_HAND_JOINT_MIDDLE_TIP_EXT};
+        for (int h = 0; h < 2; ++h) {
+            HandInput& hd = hands[h];
+            bool in = false;
+            if (deskOn && opt[OPT_KEYS_POINTER_OFF] >= 0.5f && hd.isHand && handTracked[h]) {
+                // leaving needs a bit more distance than entering (no flicker at the edge)
+                float m = opt[OPT_KEYS_MARGIN] + (handOnKeys[h] ? 0.05f : 0);
+                float top = opt[OPT_KEYS_HEIGHT] + (handOnKeys[h] ? 0.07f : 0);
+                for (int j : kJoints) {
+                    const XrHandJointLocationEXT& jl = joints[h][j];
+                    if (!(jl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) continue;
+                    Vec3 l = transformPoint(inv, Vec3(jl.pose.position));
+                    if (fabsf(l.x) < deskW / 2 + m && fabsf(l.z) < deskD / 2 + m && l.y > -0.08f && l.y < top) {
+                        in = true;
+                        break;
+                    }
+                }
+            }
+            if (in) {
+                handOnKeys[h] = true;
+                handLeftKeysUs[h] = 0;
+            } else if (handOnKeys[h]) {
+                if (!handLeftKeysUs[h]) handLeftKeysUs[h] = now;
+                if (now - handLeftKeysUs[h] >= (int64_t)(opt[OPT_KEYS_RELEASE] * 1e6f) || !hd.isHand) handOnKeys[h] = false;
+            }
+            if (handOnKeys[h] && hd.isHand) {
+                hd.aimValid = false;
+                hd.trigger = 0;
+                hd.primary = hd.ringPinch = false;
+            }
         }
     }
 
@@ -1285,6 +1450,26 @@ public:
 
         const int64_t now = monoUs();
 
+        // Desk pose in app space (it is stored in stage space when available).
+        Pose stageInApp;
+        bool stageOk = false;
+        if (stageSpace) {
+            XrSpaceLocation sl{XR_TYPE_SPACE_LOCATION};
+            if (XR_SUCCEEDED(xrLocateSpace(stageSpace, appSpace, time, &sl)) &&
+                (sl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+                stageInApp = Pose(sl.pose);
+                stageOk = true;
+            }
+        }
+        Pose deskInApp = stageOk ? stageInApp * deskPose : deskPose;
+        // Placement uses both hands, unless a controller is the active pointer (then: pointer + click).
+        bool controllerActive = hands[activeHand].aimValid && !hands[activeHand].isHand;
+        bool handPlacing = deskPlacing && !controllerActive;
+        deskByHands = handPlacing;
+        if (handPlacing && placeDeskWithHands(head, now, deskInApp) && (stageOk || !stageSpace))
+            deskPose = stageOk ? inverse(stageInApp) * deskInApp : deskInApp;
+        updateHandsOnKeys(deskInApp, now);
+
         // ---- controller shortcuts (hands use the toolbar)
         for (int h = 0; h < 2; ++h) {
             HandInput& hd = hands[h];
@@ -1331,8 +1516,8 @@ public:
         bool trigUp = !trig && ah.triggerHeld;
         ah.triggerHeld = trig;
 
-        // ---- desk window placement: follow the pointer origin, confirm with a click
-        if (deskPlacing && ah.aimValid) {
+        // ---- desk window placement with a controller: follow the pointer origin, confirm with a click
+        if (deskPlacing && !handPlacing && ah.aimValid && !ah.isHand) {
             Vec3 fwd = rotate(head.q, Vec3(0, 0, -1));
             fwd.y = 0;
             Pose appDesk(lookRotation(-normalize(fwd)), ah.aim.p - Vec3(0, ah.isHand ? 0.04f : 0.02f, 0));
@@ -1349,6 +1534,7 @@ public:
             }
             if (trigDown && hit.kind != HIT_TOOLBAR) {
                 deskPlacing = false;
+                optionsSendPending = true;  // the depth is an option
                 settingsDirty = true;
                 toolbarDirty = true;
                 haptic(activeHand, 0.4f, 15000000);
@@ -1399,6 +1585,29 @@ public:
             }
             settingsDirty = true;
         }
+
+        // ---- options panel: click, or hold on -/+ to repeat
+        int newOptHover = -1;
+        if (hit.kind == HIT_OPTIONS) {
+            float px = hit.u * kOptW, py = hit.v * optH;
+            for (auto& it : optItems)
+                if (it.action >= 0 && px >= it.x0 && px <= it.x1 && py >= it.y0 && py <= it.y1) newOptHover = it.action;
+        }
+        optHover = newOptHover;
+        if (hit.kind == HIT_OPTIONS) {
+            bool repeatable = optRepeatAction >= 0 && optRepeatAction < ACT_CLOSE && optRepeatAction % 3 != 2;
+            if (trigDown && optHover >= 0) {
+                optionsAction(optHover);
+                haptic(activeHand, 0.25f, 8000000);
+                optRepeatAction = optHover;
+                optRepeatAt = now + 450000;
+            } else if (trig && repeatable && optRepeatAction == optHover && now >= optRepeatAt) {
+                optionsAction(optRepeatAction);
+                optRepeatAt = now + 110000;
+            }
+            trigDown = false;
+        }
+        if (!trig) optRepeatAction = -1;
 
         // ---- toolbar buttons
         if (trigDown && hit.kind == HIT_TOOLBAR && hoverButton >= 0) {
@@ -1523,7 +1732,8 @@ public:
             "\n\nControllers: trigger = click, A/X = right click, thumbstick = scroll, grip = move\n"
             "Hands: index pinch = click, middle pinch = right click,\n"
             "           ring pinch + move the hand = scroll\n"
-            "Handle under the screen: grab and move. Toolbar: keyboard, keys, screens";
+            "Handle under the screen: grab and move. Toolbar: keyboard, keys, screens\n"
+            "Desk: press it, rest both hands flat on the keyboard and hold still";
         std::string text = std::string("MirRoar\x01") + body;
         if (text == panelText && panelHasContent) return;
         panelText = text;
@@ -1564,6 +1774,158 @@ public:
             Renderer::updateTexture2D(tex, W, H, rgba.data());
     }
 
+    // ============================================================== options panel
+    // Laid out and hit-tested here, drawn by MainActivity.renderItems.
+    struct UiItem {
+        int kind;  // 0 title, 1 section header, 2 label, 3 value, 4 button
+        float x0, y0, x1, y1;
+        std::string text;
+        int action = -1;  // clickable: option i -> i*3 minus, i*3+1 plus, i*3+2 toggle; or ACT_*
+        bool on = false;
+    };
+    enum { ACT_CLOSE = 1000, ACT_RESET = 1001 };
+    static constexpr int kOptW = 1400;
+    static constexpr float kOptPanelW = 1.0f;     // meters
+    static constexpr float kOptPanelGap = 0.40f;  // in front of the screen, towards the user
+    bool optionsOpen = false;
+    Swapchain optionsSwapchain;
+    GLuint optionsTex = 0;
+    std::vector<UiItem> optItems;
+    int optH = 0;
+    int optHover = -1;
+    std::string optionsKey;
+    int optRepeatAction = -1;
+    int64_t optRepeatAt = 0;
+
+    std::vector<UiItem> layoutOptions() {
+        std::vector<UiItem> it;
+        const float pad = 44, rowH = 76, btn = 60, valW = 230;
+        float y = 30;
+        it.push_back({0, pad, y, kOptW - pad - 220, y + 90, "Options"});
+        it.push_back({4, kOptW - pad - 180, y + 12, kOptW - pad, y + 78, "Close", ACT_CLOSE});
+        y += 110;
+        const char* group = nullptr;
+        for (int i = 0; i < OPT_COUNT; ++i) {
+            const OptionDef& d = kOptions[i];
+            if (!group || strcmp(group, d.group) != 0) {
+                group = d.group;
+                it.push_back({1, pad, y + 8, kOptW - pad, y + rowH, group});
+                y += rowH + 4;
+            }
+            float xr = kOptW - pad, xm = xr - btn * 2 - valW;
+            it.push_back({2, pad + 24, y, xm - 24, y + rowH, d.label});
+            float by0 = y + (rowH - btn) / 2, by1 = by0 + btn;
+            if (!d.unit) {
+                bool on = opt[i] >= 0.5f;
+                it.push_back({4, xm, by0, xr, by1, on ? "On" : "Off", i * 3 + 2, on});
+            } else {
+                it.push_back({4, xm, by0, xm + btn, by1, "-", i * 3});
+                it.push_back({3, xm + btn, y, xr - btn, y + rowH, formatOption(i, opt[i])});
+                it.push_back({4, xr - btn, by0, xr, by1, "+", i * 3 + 1});
+            }
+            y += rowH;
+        }
+        y += 26;
+        it.push_back({4, pad, y, pad + 420, y + 78, "Reset to defaults", ACT_RESET});
+        it.push_back({2, pad + 460, y, kOptW - pad, y + 78, "These can also be changed in the PC server"});
+        y += 78 + 36;
+        optH = (int)y;
+        return it;
+    }
+
+    bool optionsPose(Pose& pose, float& w, float& h) {
+        if (!optionsOpen || !placed || !optH) return false;
+        int a = anyReady() ? anchorScreen() : -1;
+        const Pose& base = a >= 0 ? screens[a].pose : homePose;
+        w = kOptPanelW;
+        h = w * optH / kOptW;
+        pose = Pose(base.q, transformPoint(base, Vec3(0, 0, kOptPanelGap)));
+        return true;
+    }
+
+    void optionsAction(int a) {
+        if (a == ACT_CLOSE) {
+            optionsOpen = false;
+            toolbarDirty = true;
+            return;
+        }
+        if (a == ACT_RESET) {
+            defaultOptions(opt);
+        } else {
+            int i = a / 3, k = a % 3;
+            if (i >= OPT_COUNT) return;
+            if (k == 2) opt[i] = opt[i] >= 0.5f ? 0.0f : 1.0f;
+            else opt[i] = clampOption(i, opt[i] + (k == 1 ? kOptions[i].step : -kOptions[i].step));
+        }
+        settingsDirty = true;
+        optionsSendPending = true;
+    }
+
+    // Applies options edited on the PC; reports local edits (and the initial values) to the PC.
+    void syncOptions() {
+        {
+            std::lock_guard<std::mutex> lk(streamM);
+            if (pendingOptionsValid) {
+                decodeOptions(pendingOptions.data(), pendingOptions.size(), opt);
+                pendingOptionsValid = false;
+                settingsDirty = true;
+            }
+        }
+        if (optionsSendPending && connected) {
+            optionsSendPending = false;
+            std::string t = encodeOptions(opt);
+            net_.send(C_OPTIONS, t.data(), t.size());
+        }
+    }
+
+    void updateOptionsPanel() {
+        if (!optionsOpen) {
+            optItems.clear();
+            return;
+        }
+        optItems = layoutOptions();
+        std::string key = std::to_string(optHover);
+        for (auto& i : optItems) key += "|" + i.text + (i.on ? "1" : "0");
+        if (key == optionsKey && optionsSwapchain.handle) return;
+        if (!optionsSwapchain.handle && !createSwapchain(optionsSwapchain, kOptW, optH)) return;
+        if (!midRenderItems) return;
+        int n = (int)optItems.size();
+        std::vector<jint> kinds(n), flags(n);
+        std::vector<jfloat> rects(n * 4);
+        jobjectArray texts = jni->NewObjectArray(n, stringClass, nullptr);
+        for (int i = 0; i < n; ++i) {
+            const UiItem& it = optItems[i];
+            kinds[i] = it.kind;
+            flags[i] = (it.action >= 0 && it.action == optHover ? 1 : 0) | (it.on ? 2 : 0);
+            rects[i * 4] = it.x0, rects[i * 4 + 1] = it.y0, rects[i * 4 + 2] = it.x1, rects[i * 4 + 3] = it.y1;
+            jstring js = jni->NewStringUTF(it.text.c_str());
+            jni->SetObjectArrayElement(texts, i, js);
+            jni->DeleteLocalRef(js);
+        }
+        jintArray jk = jni->NewIntArray(n), jf = jni->NewIntArray(n);
+        jfloatArray jr = jni->NewFloatArray(n * 4);
+        jni->SetIntArrayRegion(jk, 0, n, kinds.data());
+        jni->SetIntArrayRegion(jf, 0, n, flags.data());
+        jni->SetFloatArrayRegion(jr, 0, n * 4, rects.data());
+        jintArray px = (jintArray)jni->CallStaticObjectMethod(activityClass, midRenderItems, (jint)kOptW, (jint)optH, jk,
+                                                              jr, texts, jf);
+        jni->DeleteLocalRef(jk);
+        jni->DeleteLocalRef(jf);
+        jni->DeleteLocalRef(jr);
+        jni->DeleteLocalRef(texts);
+        if (!px || jni->ExceptionCheck()) {
+            jni->ExceptionClear();
+            return;
+        }
+        uploadArgb(px, kOptW, optH, optionsTex);
+        if (!beginSwapchain(optionsSwapchain)) return;
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        renderer.drawTexture(optionsTex, -1, -1, 1, 1);
+        endSwapchain(optionsSwapchain);
+        optionsKey = key;
+    }
+
     void updateToolbar() {
         std::vector<std::string> labels(TB_COUNT);
         labels[TB_KEYBOARD] = "Keyboard";
@@ -1587,7 +1949,10 @@ public:
         labels[TB_ENV] = kEnvNames[envMode];
         labels[TB_CURVED] = curved ? "Curved" : "Flat";
         labels[TB_RECENTER] = "Recenter";
-        labels[TB_DESK] = deskPlacing ? "Place it..." : "Desk";
+        labels[TB_OPTIONS] = "Options";
+        if (!deskPlacing) labels[TB_DESK] = "Desk";
+        else if (!deskByHands) labels[TB_DESK] = "Place it...";
+        else labels[TB_DESK] = deskHandsValid ? "Hold still..." : "Hands on desk";
 
         uint32_t mask = 0;
         if (keyboardVisible()) mask |= 1u << TB_KEYBOARD;
@@ -1597,6 +1962,7 @@ public:
         if (l & 4) mask |= 1u << TB_SHIFT;
         if (l & 8) mask |= 1u << TB_WIN;
         if (deskOn) mask |= 1u << TB_DESK;
+        if (optionsOpen) mask |= 1u << TB_OPTIONS;
 
         std::string key = std::to_string(mask) + "|" + std::to_string(hoverButton);
         for (auto& s : labels) key += "|" + s;
@@ -1825,7 +2191,7 @@ public:
         XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         XrCompositionLayerProjectionView projViews[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                                          {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
-        XrCompositionLayerQuad quads[kMaxStreams + 2];
+        XrCompositionLayerQuad quads[kMaxStreams + 3];
         XrCompositionLayerCylinderKHR cyls[kMaxStreams];
         XrCompositionLayerSettingsFB settings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
         int nq = 0, nc = 0;
@@ -1853,6 +2219,7 @@ public:
                 }
             }
 
+            syncOptions();
             updateInput(fs.predictedDisplayTime, head, dt);
 
             ++frameIndex;
@@ -1868,6 +2235,7 @@ public:
             bool ready = anyReady() && connected;
             if (!ready) updatePanel();
             updateToolbar();
+            updateOptionsPanel();
 
             if (deskGeometry && deskOn && envMode != ENV_PASSTHROUGH) {
                 XrGeometryInstanceTransformFB gt{XR_TYPE_GEOMETRY_INSTANCE_TRANSFORM_FB};
@@ -1919,14 +2287,24 @@ public:
                 }
 
                 // desk window outline while placing it
-                if (deskPlacing) {
+                // (blue = follow the hands, filling up green while they hold still; green flash = confirmed)
+                bool justPlaced = deskConfirmedUs && now - deskConfirmedUs < 700000;
+                if (deskPlacing || justPlaced) {
                     Pose dp = stageValid && stageSpace ? stageInApp * deskPose : deskPose;
                     Vec3 c[4] = {transformPoint(dp, Vec3(-deskW / 2, 0, -deskD / 2)),
                                  transformPoint(dp, Vec3(deskW / 2, 0, -deskD / 2)),
                                  transformPoint(dp, Vec3(deskW / 2, 0, deskD / 2)),
                                  transformPoint(dp, Vec3(-deskW / 2, 0, deskD / 2))};
-                    const float oc[3] = {0.35f, 0.65f, 1.0f};
-                    for (int k = 0; k < 4; ++k) renderer.drawRay(vp, eyePose.p, c[k], c[(k + 1) % 4], 0.006f, oc, 0.9f, 0.9f);
+                    const float blue[3] = {0.35f, 0.65f, 1.0f}, green[3] = {0.35f, 0.95f, 0.5f};
+                    bool waiting = deskPlacing && deskByHands && !deskHandsValid;
+                    const float* oc = justPlaced ? green : blue;
+                    float oa = waiting ? 0.35f : 0.9f;
+                    for (int k = 0; k < 4; ++k) renderer.drawRay(vp, eyePose.p, c[k], c[(k + 1) % 4], 0.006f, oc, oa, oa);
+                    if (deskPlacing && deskProgress > 0) {  // hold progress along the edge nearest to the user
+                        Vec3 a = transformPoint(dp, Vec3(-deskW / 2, 0.002f, deskD / 2));
+                        Vec3 b = transformPoint(dp, Vec3(-deskW / 2 + deskW * deskProgress, 0.002f, deskD / 2));
+                        renderer.drawRay(vp, eyePose.p, a, b, 0.014f, green, 0.95f, 0.95f);
+                    }
                 }
 
                 if (sessionState == XR_SESSION_STATE_FOCUSED) {
@@ -2013,6 +2391,7 @@ public:
                 Pose tp;
                 float tw, th;
                 if (toolbarTex && toolbarPose(tp, tw, th)) addQuad(toolbarSwapchain, tp, tw, th, true);
+                if (optionsTex && optionsPose(tp, tw, th)) addQuad(optionsSwapchain, tp, tw, th, true);
             }
         }
 

@@ -49,9 +49,12 @@ The trigger (or pinch) of the other hand makes it the active pointer.
 - **Ctrl / Alt / Shift / Win**: stay pressed until the next key or click. Pressing Win twice opens the Start menu.
 - **Screen**: cycles Screen 1 → Screen 2 → … → all screens. The choice is remembered.
 - **Environment**, **Flat/Curved**, **Recenter**.
-- **Desk**: a passthrough window over your real keyboard, visible in virtual environments. Press *Desk*, hold the controller (or your hand) over the center of the keyboard and pull the trigger (or pinch) to drop it. While placing it, the thumbstick changes its width and depth. Press *Desk* again to remove it. It stays fixed in the room even when you recenter.
+- **Desk**: a passthrough window over your real keyboard, visible in virtual environments. Press *Desk*, then rest both hands flat on the keyboard, one at each end: the distance between them sets the width, and the hands set the position and tilt. Hold them still for 2 seconds (the green bar fills up) to confirm. With a controller instead: hold it over the center of the keyboard and pull the trigger; the thumbstick changes width and depth. Press *Desk* during placement to cancel, or afterwards to remove the window. It stays fixed in the room even when you recenter.
+- **Typing with tracked hands**: while a hand rests inside the desk window, its pointer is switched off, so typing doesn't move the PC cursor or click.
 
-Position, size, environment and desk window are saved between sessions.
+- **Options**: fine-tuning of the two-hand desk placement and of the pointer switch-off while typing, with -/+ buttons. The same options appear in the server control panel (*Headset options*) while the headset is connected, so you can also tune them from the PC; changes on either side apply immediately.
+
+Position, size, environment, desk window and options are saved in the headset between sessions.
 
 ### Server control panel
 
@@ -92,6 +95,7 @@ PC (MirRoarServer.exe, C++ / MinGW, static)             Quest 3 (C++ OpenXR + a 
 ```
 
 - Shared wire protocol: [common/protocol.h](common/protocol.h)
+- Headset options (one table shared by the app and the server): [common/options.h](common/options.h)
 - Server: [server/src/core](server/src/core) (portable: sessions, network, statistics), [server/src/platform](server/src/platform) (OS interfaces; Windows implementation in `platform/win`, Linux planned), [server/src/gui](server/src/gui) (Dear ImGui + ImPlot on SDL3)
 - Quest app: [quest/src](quest/src), [MainActivity.java](quest/java/com/mirroar/app/MainActivity.java)
 

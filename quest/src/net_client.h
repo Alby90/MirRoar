@@ -23,6 +23,7 @@ public:
         virtual void onCursorShape(const mirroar::SCursorShape& s, const uint8_t* rgba) = 0;
         virtual void onAudioConfig(const mirroar::SAudioConfig& cfg) = 0;
         virtual void onAudio(const int16_t* samples, size_t frames) = 0;
+        virtual void onOptions(const char* text, size_t len) = 0;  // headset options edited on the PC
     };
 
     explicit NetClient(Handler* h) : handler_(h) {}

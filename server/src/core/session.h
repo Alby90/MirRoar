@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "../../../common/options.h"
 #include "../../../common/protocol.h"
 #include "../platform/platform.h"
 #include "config.h"
@@ -28,6 +29,10 @@ public:
     void updateConfig(const ServerConfig& cfg);  // applied live (streams restart if needed)
     void selectMonitors(uint32_t mask) { monitorMask_ = mask; }
     uint32_t activeMask() const { return activeMask_; }
+
+    // Headset options: the headset reports them (C_OPTIONS); edits from the GUI are pushed back (S_OPTIONS).
+    bool headsetOptions(float* out);  // false until the headset has reported them
+    void setHeadsetOptions(const float* v);
 
 private:
     struct OutMsg {
@@ -73,6 +78,10 @@ private:
     mirroar::CHello hello_{};
     std::atomic<uint32_t> monitorMask_{0};
     std::atomic<uint32_t> activeMask_{0};
+
+    std::mutex optM_;
+    bool hasOptions_ = false;
+    float options_[mirroar::OPT_COUNT] = {};
 
     std::unique_ptr<InputInjector> input_;
     std::mutex inputM_;

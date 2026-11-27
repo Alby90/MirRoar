@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #include "../core/log.h"
@@ -129,6 +130,7 @@ struct Gui {
     ImFont* bigFont = nullptr;
     uint64_t lastLogVersion = 0;
     char nameBuf[64] = {};
+    float opts[mirroar::OPT_COUNT] = {};  // headset options being shown/edited
 
     explicit Gui(Server& s) : server(s) {}
 
@@ -262,6 +264,8 @@ struct Gui {
                 for (auto& d : st.usbDevices) ImGui::TextColored(kGood, "Headset on cable: %s", d.c_str());
         }
 
+        optionsSection();
+
         ImGui::SeparatorText("General");
         ImGui::SetNextItemWidth(-1);
         ImGui::InputTextWithHint("##name", "PC name shown in the headset", nameBuf, sizeof(nameBuf));
@@ -278,6 +282,46 @@ struct Gui {
         }
         if (ImGui::Checkbox("Start with Windows", &autostart)) setAutostart(autostart);
         if (ImGui::Checkbox("Start hidden in the system tray", &cfg.startMinimized)) commit();
+    }
+
+    // Headset options: stored in the headset; shown and edited here while it is connected.
+    void optionsSection() {
+        using namespace mirroar;
+        ImGui::SeparatorText("Headset options");
+        if (!st.connected || !st.hasOptions) {
+            ImGui::TextDisabled(st.connected ? "Waiting for the headset options..." : "Connect the headset to change its options.");
+            return;
+        }
+        if (!ImGui::IsAnyItemActive()) memcpy(opts, st.options, sizeof(opts));
+        const char* group = nullptr;
+        for (int i = 0; i < OPT_COUNT; ++i) {
+            const OptionDef& d = kOptions[i];
+            if (!group || strcmp(group, d.group) != 0) {
+                group = d.group;
+                ImGui::TextDisabled("%s", group);
+            }
+            ImGui::PushID(i);
+            if (!d.unit) {
+                bool on = opts[i] >= 0.5f;
+                if (ImGui::Checkbox(d.label, &on)) {
+                    opts[i] = on ? 1.0f : 0.0f;
+                    server.setHeadsetOptions(opts);
+                }
+            } else {
+                float shown = opts[i] * d.shown;
+                char fmt[96];
+                snprintf(fmt, sizeof(fmt), "%s: %%.%df %s", d.label, d.decimals, d.unit);
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::SliderFloat("##v", &shown, d.min * d.shown, d.max * d.shown, fmt))
+                    opts[i] = clampOption(i, shown / d.shown);
+                if (ImGui::IsItemDeactivatedAfterEdit()) server.setHeadsetOptions(opts);
+            }
+            ImGui::PopID();
+        }
+        if (ImGui::Button("Reset options to defaults")) {
+            defaultOptions(opts);
+            server.setHeadsetOptions(opts);
+        }
     }
 
     // ---------------------------------------------------------- right column

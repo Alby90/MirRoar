@@ -265,6 +265,11 @@ void Server::selectMonitors(uint32_t mask) {
     if (session_) session_->selectMonitors(mask);
 }
 
+void Server::setHeadsetOptions(const float* v) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (session_ && session_->alive()) session_->setHeadsetOptions(v);
+}
+
 void Server::disconnectClient() {
     std::unique_ptr<Session> s;
     {
@@ -289,6 +294,7 @@ Server::Status Server::status() {
             st.client = session_->clientName();
             st.via = session_->peer();
             st.activeMask = session_->activeMask();
+            st.hasOptions = session_->headsetOptions(st.options);
         }
     }
     for (auto& ni : listIPv4Interfaces()) st.addresses.push_back(ipToString(ni.addr) + "  (" + ni.name + ")");

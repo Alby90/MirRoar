@@ -260,6 +260,9 @@ bool NetClient::session(int fd, const std::string& via) {
                     handler_->onAudioConfig(c);
                 }
                 break;
+            case S_OPTIONS:
+                handler_->onOptions((const char*)p, h.size);
+                break;
             case S_AUDIO:
                 handler_->onAudio((const int16_t*)p, h.size / 4);
                 break;

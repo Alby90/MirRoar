@@ -23,6 +23,7 @@ public:
     ServerConfig config();
     void selectMonitors(uint32_t mask);         // live selection on the connected headset
     void disconnectClient();
+    void setHeadsetOptions(const float* v);     // pushed to the connected headset, which stores them
 
     struct Status {
         bool listening = false;
@@ -35,6 +36,8 @@ public:
         std::vector<MonitorDesc> monitors;
         uint32_t activeMask = 0;
         StatsCollector::Snapshot stats;
+        bool hasOptions = false;  // the connected headset reported its options
+        float options[mirroar::OPT_COUNT] = {};
     };
     Status status();
 

@@ -9,7 +9,7 @@ out = sys.argv[3] if len(sys.argv) > 3 else "test.h264"
 
 s = socket.create_connection((host, 47800))
 mask = int(sys.argv[4]) if len(sys.argv) > 4 else 3
-hello = struct.pack("<IIIII64sI", 3, 0, 0, 0, 0, b"test-client", mask)
+hello = struct.pack("<IIIII64sI", 4, 0, 0, 0, 0, b"test-client", mask)
 s.sendall(struct.pack("<IHH", len(hello), 100, 0) + hello)
 
 def recv_all(n):

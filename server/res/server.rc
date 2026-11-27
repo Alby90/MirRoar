@@ -3,8 +3,8 @@
 1 ICON "mirroar.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,2,0,0
-PRODUCTVERSION 0,2,0,0
+FILEVERSION 0,3,0,0
+PRODUCTVERSION 0,3,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -14,8 +14,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "MirRoar Server - PC remote desktop for Meta Quest"
       VALUE "ProductName", "MirRoar"
-      VALUE "FileVersion", "0.2.0"
-      VALUE "ProductVersion", "0.2.0"
+      VALUE "FileVersion", "0.3.0"
+      VALUE "ProductVersion", "0.3.0"
       VALUE "OriginalFilename", "MirRoarServer.exe"
     END
   END

@@ -7,7 +7,7 @@
 
 namespace mirroar {
 
-constexpr uint32_t kProtocolVersion = 3;
+constexpr uint32_t kProtocolVersion = 4;
 constexpr uint16_t kTcpPort = 47800;        // server listens here (also used by adb reverse)
 constexpr uint16_t kDiscoveryPort = 47801;  // server broadcasts beacons here (UDP)
 constexpr char kDiscoveryMagic[8] = {'M', 'I', 'R', 'R', 'O', 'A', 'R', '1'};
@@ -25,6 +25,7 @@ enum MsgType : uint16_t {
     S_PONG = 8,           // SPong
     S_MONITOR_LIST = 9,   // SMonitorList + count * SMonitorInfo
     S_VIDEO_STOP = 10,    // SStreamId: the stream is no longer sent
+    S_OPTIONS = 11,       // headset options edited on the PC: text "key=value" lines (see options.h)
 
     // client -> server
     C_HELLO = 100,            // CHello
@@ -37,6 +38,7 @@ enum MsgType : uint16_t {
     C_PING = 107,             // SPing
     C_SELECT_MONITORS = 108,  // CSelectMonitors
     C_STATS = 109,            // CStats (latency measured by the headset, ~2 per second per stream)
+    C_OPTIONS = 110,          // current headset options, after C_HELLO and on every change (see options.h)
 };
 
 enum VideoCodec : uint32_t { CODEC_H264 = 0, CODEC_HEVC = 1 };
